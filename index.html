@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>Trailhead — Offline Player</title>
+<title>JourneyCake — Offline Player</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -97,17 +97,43 @@
   }
   .import-btn:hover, .install-btn:hover{ border-color: var(--accent); color: var(--accent); }
 
+  .plist-row{
+    display:flex; flex-wrap:wrap; gap:8px; margin: 2px 0 18px;
+  }
+  .plist-chip{
+    background: var(--surface); border:1px solid var(--line); color: var(--text-dim);
+    font-size:12px; padding:6px 12px; border-radius:14px; cursor:pointer;
+    display:flex; align-items:center; gap:6px; white-space:nowrap;
+  }
+  .plist-chip:hover{ border-color: var(--accent); }
+  .plist-chip.active{ color: var(--accent); border-color: var(--accent); background: var(--surface-alt); }
+  .plist-chip.new-chip{ color: var(--text-dim); border-style:dashed; }
+  .plist-chip .plist-del{ color: var(--text-dim); font-size:11px; }
+  .plist-chip .plist-del:hover{ color: var(--accent); }
+
   .playlist{ list-style:none; margin:0; padding:0; }
   .playlist li{
-    display:flex; align-items:center; gap:12px; padding:11px 4px;
+    display:flex; align-items:center; gap:10px; padding:11px 4px;
     border-bottom: 1px solid var(--line); cursor:pointer; font-size:14px;
+    position: relative;
   }
   .playlist li:hover{ background: var(--surface); }
   .playlist li.active{ color: var(--accent); border-left:2px solid var(--accent); padding-left:8px; }
   .playlist .idx{ color: var(--text-dim); font-size:11px; width:18px; font-variant-numeric: tabular-nums; }
   .playlist .name{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .playlist .remove{ color: var(--text-dim); font-size:14px; padding:0 4px; }
-  .playlist .remove:hover{ color: var(--accent); }
+  .playlist .add-to-playlist, .playlist .remove{ color: var(--text-dim); font-size:14px; padding:0 4px; }
+  .playlist .add-to-playlist:hover, .playlist .remove:hover{ color: var(--accent); }
+
+  .add-popover{
+    position:absolute; right:0; top: 36px; z-index:5;
+    background: var(--surface-alt); border:1px solid var(--line);
+    min-width: 180px; padding: 8px; font-size:13px;
+  }
+  .add-popover label{
+    display:flex; align-items:center; gap:8px; padding:6px 4px; cursor:pointer;
+  }
+  .add-popover label:hover{ color: var(--accent); }
+  .add-popover .none-yet{ color: var(--text-dim); font-size:12px; padding:4px; }
   .empty-state{
     color: var(--text-dim); font-size:13px; padding:20px 4px;
     border: 1px dashed var(--line); text-align:center;
@@ -148,7 +174,7 @@
     <div class="status-dot" id="statusDot" title="Online"></div>
   </div>
 
-  <h1 class="wordmark">Trailhead</h1>
+  <h1 class="wordmark">JourneyCake</h1>
   <p class="sub">Your own files. No feed, no algorithm. Works fully offline.</p>
 
   <div class="quote-sign">
@@ -170,10 +196,12 @@
   </div>
 
   <div class="section-label">
-    <span>Playlist</span>
+    <span>Library</span>
     <button class="import-btn" id="importBtn">+ Import files</button>
   </div>
   <input type="file" id="fileInput" accept="audio/*" multiple>
+  <div class="section-label"><span>Playlists</span></div>
+  <div class="plist-row" id="plistRow"></div>
   <ul class="playlist" id="playlist"></ul>
   <div class="empty-state" id="emptyState">No tracks yet — import affirmations, voice notes, or songs from your device. They'll stay here offline, even after you close the app.</div>
 
@@ -183,7 +211,7 @@
   </div>
 
   <div class="install-banner" id="installBanner">
-    <span>Install Trailhead on your home screen for full offline use.</span>
+    <span>Install JourneyCake on your home screen for full offline use.</span>
     <button class="install-btn" id="installBtn">Install</button>
   </div>
 
@@ -222,8 +250,8 @@ document.getElementById('installBtn').addEventListener('click', async () => {
 });
 
 // ---------- IndexedDB ----------
-const DB_NAME = "trailhead-db";
-const DB_VERSION = 1;
+const DB_NAME = "trailhead-db"; // internal id only — kept as-is so your already-imported tracks aren't lost
+const DB_VERSION = 2;
 let db;
 
 function openDB(){
@@ -236,6 +264,9 @@ function openDB(){
       }
       if (!_db.objectStoreNames.contains('kv')) {
         _db.createObjectStore('kv', { keyPath: 'key' });
+      }
+      if (!_db.objectStoreNames.contains('playlists')) {
+        _db.createObjectStore('playlists', { keyPath: 'id', autoIncrement: true });
       }
     };
     req.onsuccess = (e) => resolve(e.target.result);
@@ -315,9 +346,13 @@ document.getElementById('dateLabel').textContent = new Date().toLocaleDateString
 const audio = document.getElementById('audio');
 const playlistEl = document.getElementById('playlist');
 const emptyState = document.getElementById('emptyState');
-let tracks = []; // {id, name, blob}
-let currentIndex = -1;
+const plistRowEl = document.getElementById('plistRow');
+let tracks = []; // {id, name, blob} — the full imported library
+let playlists = []; // {id, name, trackIds: []} — themed playlists
+let activePlaylistId = null; // null = "All Tracks"
+let currentTrackId = null;
 let currentUrl = null;
+let openPopoverId = null;
 
 function fmtTime(s){
   if (!isFinite(s)) return "0:00";
@@ -326,55 +361,148 @@ function fmtTime(s){
   return `${m}:${sec}`;
 }
 
+function visibleTracks(){
+  if (activePlaylistId === null) return tracks;
+  const pl = playlists.find(p => p.id === activePlaylistId);
+  if (!pl) return tracks;
+  return pl.trackIds.map(id => tracks.find(t => t.id === id)).filter(Boolean);
+}
+
+function renderPlaylistRow(){
+  plistRowEl.innerHTML = "";
+  const allChip = document.createElement('div');
+  allChip.className = 'plist-chip' + (activePlaylistId === null ? ' active' : '');
+  allChip.textContent = 'All Tracks';
+  allChip.addEventListener('click', () => { activePlaylistId = null; renderPlaylistRow(); renderPlaylist(); });
+  plistRowEl.appendChild(allChip);
+
+  playlists.forEach(p => {
+    const chip = document.createElement('div');
+    chip.className = 'plist-chip' + (activePlaylistId === p.id ? ' active' : '');
+    chip.innerHTML = `<span class="plist-label">${p.name}</span><span class="plist-del" title="Delete playlist">✕</span>`;
+    chip.querySelector('.plist-label').addEventListener('click', () => { activePlaylistId = p.id; renderPlaylistRow(); renderPlaylist(); });
+    chip.querySelector('.plist-del').addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      if (!confirm(`Delete the "${p.name}" playlist? Your tracks stay in your library.`)) return;
+      await idbDelete('playlists', p.id);
+      playlists = playlists.filter(x => x.id !== p.id);
+      if (activePlaylistId === p.id) activePlaylistId = null;
+      renderPlaylistRow(); renderPlaylist();
+    });
+    plistRowEl.appendChild(chip);
+  });
+
+  const newChip = document.createElement('div');
+  newChip.className = 'plist-chip new-chip';
+  newChip.textContent = '+ New playlist';
+  newChip.addEventListener('click', async () => {
+    const name = prompt('Name this playlist (e.g. Run Hard, Stretch and Visualize):');
+    if (!name || !name.trim()) return;
+    const p = { name: name.trim(), trackIds: [] };
+    const id = await idbAdd('playlists', p);
+    p.id = id;
+    playlists.push(p);
+    activePlaylistId = id;
+    renderPlaylistRow(); renderPlaylist();
+  });
+  plistRowEl.appendChild(newChip);
+}
+
 function renderPlaylist(){
   playlistEl.innerHTML = "";
-  emptyState.style.display = tracks.length ? "none" : "block";
-  tracks.forEach((t, i) => {
+  const list = visibleTracks();
+  const noneInLibrary = tracks.length === 0;
+  const emptyPlaylist = activePlaylistId !== null && list.length === 0;
+  emptyState.style.display = (noneInLibrary || emptyPlaylist) ? "block" : "none";
+  emptyState.textContent = emptyPlaylist
+    ? "This playlist is empty — tap ＋ next to a track in All Tracks to add it here."
+    : "No tracks yet — import affirmations, voice notes, or songs from your device. They'll stay here offline, even after you close the app.";
+
+  list.forEach((t, i) => {
     const li = document.createElement('li');
-    if (i === currentIndex) li.classList.add('active');
-    li.innerHTML = `<span class="idx">${(i+1).toString().padStart(2,'0')}</span><span class="name">${t.name}</span><span class="remove" data-id="${t.id}">✕</span>`;
-    li.querySelector('.name').addEventListener('click', () => loadTrack(i, true));
-    li.querySelector('.idx').addEventListener('click', () => loadTrack(i, true));
+    if (t.id === currentTrackId) li.classList.add('active');
+    li.innerHTML = `<span class="idx">${(i+1).toString().padStart(2,'0')}</span><span class="name">${t.name}</span><span class="add-to-playlist" title="Add to a playlist">＋</span><span class="remove" data-id="${t.id}">✕</span>`;
+    li.querySelector('.name').addEventListener('click', () => loadTrackById(t.id, true));
+    li.querySelector('.idx').addEventListener('click', () => loadTrackById(t.id, true));
     li.querySelector('.remove').addEventListener('click', async (ev) => {
       ev.stopPropagation();
-      await removeTrack(i);
+      await removeTrack(t.id);
+    });
+    li.querySelector('.add-to-playlist').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      openAddToPlaylistPopover(li, t.id);
     });
     playlistEl.appendChild(li);
   });
 }
 
-async function removeTrack(i){
-  const t = tracks[i];
-  await idbDelete('tracks', t.id);
-  const wasCurrent = i === currentIndex;
-  tracks.splice(i, 1);
-  if (wasCurrent) {
+function openAddToPlaylistPopover(li, trackId){
+  document.querySelectorAll('.add-popover').forEach(p => p.remove());
+  const pop = document.createElement('div');
+  pop.className = 'add-popover';
+  if (!playlists.length) {
+    pop.innerHTML = `<div class="none-yet">No playlists yet — tap "+ New playlist" above to create one.</div>`;
+  } else {
+    playlists.forEach(p => {
+      const checked = p.trackIds.includes(trackId) ? 'checked' : '';
+      const label = document.createElement('label');
+      label.innerHTML = `<input type="checkbox" ${checked}> ${p.name}`;
+      label.querySelector('input').addEventListener('change', async (ev) => {
+        if (ev.target.checked) {
+          if (!p.trackIds.includes(trackId)) p.trackIds.push(trackId);
+        } else {
+          p.trackIds = p.trackIds.filter(id => id !== trackId);
+        }
+        await idbPut('playlists', p);
+        if (activePlaylistId === p.id) renderPlaylist();
+      });
+      pop.appendChild(label);
+    });
+  }
+  li.appendChild(pop);
+  setTimeout(() => {
+    document.addEventListener('click', function closePop(ev){
+      if (!pop.contains(ev.target)) { pop.remove(); document.removeEventListener('click', closePop); }
+    });
+  }, 0);
+}
+
+async function removeTrack(trackId){
+  await idbDelete('tracks', trackId);
+  tracks = tracks.filter(t => t.id !== trackId);
+  playlists.forEach(p => { p.trackIds = p.trackIds.filter(id => id !== trackId); });
+  // best-effort cleanup of playlist membership in IndexedDB (fire and forget)
+  playlists.forEach(p => idbPut('playlists', p));
+  if (trackId === currentTrackId) {
     audio.pause();
     if (currentUrl) URL.revokeObjectURL(currentUrl);
     currentUrl = null;
-    currentIndex = -1;
+    currentTrackId = null;
     document.getElementById('trackTitle').textContent = tracks.length ? "Paused" : "Nothing loaded yet";
     document.getElementById('trackMeta').textContent = tracks.length ? "Pick a track" : "Import a file to begin";
     audio.removeAttribute('src');
-  } else if (i < currentIndex) {
-    currentIndex -= 1;
   }
   renderPlaylist();
 }
 
-function loadTrack(i, autoplay){
-  if (i < 0 || i >= tracks.length) return;
-  currentIndex = i;
-  const t = tracks[i];
+function loadTrackById(id, autoplay){
+  const t = tracks.find(x => x.id === id);
+  if (!t) return;
+  currentTrackId = id;
   if (currentUrl) URL.revokeObjectURL(currentUrl);
   currentUrl = URL.createObjectURL(t.blob);
   audio.src = currentUrl;
   document.getElementById('trackTitle').textContent = t.name.replace(/\.[^/.]+$/, "");
-  document.getElementById('trackMeta').textContent = `Track ${i+1} of ${tracks.length}`;
+  const list = visibleTracks();
+  const posInList = list.findIndex(x => x.id === id);
+  const playlistName = activePlaylistId !== null ? (playlists.find(p => p.id === activePlaylistId)?.name || '') : 'All Tracks';
+  document.getElementById('trackMeta').textContent = posInList >= 0
+    ? `${playlistName} · Track ${posInList+1} of ${list.length}`
+    : `Track`;
   renderPlaylist();
   if (autoplay) audio.play().then(updatePlayIcon).catch(()=>{});
   updatePlayIcon();
-  idbPut('kv', { key: 'lastIndex', value: i });
+  idbPut('kv', { key: 'lastTrackId', value: id });
 }
 
 document.getElementById('importBtn').addEventListener('click', () => {
@@ -383,32 +511,40 @@ document.getElementById('importBtn').addEventListener('click', () => {
 document.getElementById('fileInput').addEventListener('change', async (e) => {
   const files = Array.from(e.target.files || []);
   const wasEmpty = tracks.length === 0;
+  let firstNewId = null;
   for (const f of files) {
     const id = await idbAdd('tracks', { name: f.name, blob: f });
     tracks.push({ id, name: f.name, blob: f });
+    if (firstNewId === null) firstNewId = id;
   }
   renderPlaylist();
-  if (wasEmpty && tracks.length) loadTrack(0, false);
+  if (wasEmpty && tracks.length) loadTrackById(firstNewId, false);
   e.target.value = "";
 });
 
 const playBtn = document.getElementById('playBtn');
 function updatePlayIcon(){ playBtn.textContent = audio.paused ? "▶" : "❚❚"; }
 playBtn.addEventListener('click', () => {
-  if (currentIndex === -1 && tracks.length) { loadTrack(0, true); return; }
+  if (currentTrackId === null && visibleTracks().length) { loadTrackById(visibleTracks()[0].id, true); return; }
   if (audio.paused) audio.play(); else audio.pause();
   updatePlayIcon();
 });
 document.getElementById('nextBtn').addEventListener('click', () => {
-  if (!tracks.length) return;
-  loadTrack((currentIndex + 1) % tracks.length, true);
+  const list = visibleTracks();
+  if (!list.length) return;
+  const i = list.findIndex(t => t.id === currentTrackId);
+  loadTrackById(list[(i + 1 + list.length) % list.length].id, true);
 });
 document.getElementById('prevBtn').addEventListener('click', () => {
-  if (!tracks.length) return;
-  loadTrack((currentIndex - 1 + tracks.length) % tracks.length, true);
+  const list = visibleTracks();
+  if (!list.length) return;
+  const i = list.findIndex(t => t.id === currentTrackId);
+  loadTrackById(list[(i - 1 + list.length) % list.length].id, true);
 });
 audio.addEventListener('ended', () => {
-  if (currentIndex < tracks.length - 1) loadTrack(currentIndex + 1, true);
+  const list = visibleTracks();
+  const i = list.findIndex(t => t.id === currentTrackId);
+  if (i >= 0 && i < list.length - 1) loadTrackById(list[i+1].id, true);
   else updatePlayIcon();
 });
 audio.addEventListener('play', updatePlayIcon);
@@ -464,11 +600,13 @@ function renderTracker(){
 (async function boot(){
   db = await openDB();
   tracks = await idbGetAll('tracks');
+  playlists = await idbGetAll('playlists');
+  renderPlaylistRow();
   renderPlaylist();
-  const lastIndexRec = await idbGet('kv', 'lastIndex');
+  const lastTrackRec = await idbGet('kv', 'lastTrackId');
   if (tracks.length) {
-    const idx = (lastIndexRec && lastIndexRec.value < tracks.length) ? lastIndexRec.value : 0;
-    loadTrack(idx, false);
+    const stillExists = lastTrackRec && tracks.some(t => t.id === lastTrackRec.value);
+    loadTrackById(stillExists ? lastTrackRec.value : tracks[0].id, false);
   }
   await loadWeekState();
 })();

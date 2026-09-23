@@ -1,6 +1,6 @@
 {
-  "name": "Trailhead — Offline Player",
-  "short_name": "Trailhead",
+  "name": "JourneyCake — Offline Player",
+  "short_name": "JourneyCake",
   "description": "Your own files, your own affirmations, no feed, no algorithm.",
   "start_url": "./index.html",
   "scope": "./",
